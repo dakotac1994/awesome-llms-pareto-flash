@@ -1,0 +1,85 @@
+name: ci
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate data/*.json
+        run: |
+          python3 - <<'EOF'
+          import json, pathlib, sys
+
+          base_required = {
+              "name": str, "vendor": str, "url": str, "description": str,
+              "price_input_per_1m": str, "price_output_per_1m": str,
+              "price_verified": bool, "pricing_url": str, "status": str,
+              "category": str, "features": list,
+          }
+          efficiency_required = {
+              "tokens_per_sec": (int, float, type(None)),
+              "speed_verified": bool,
+              "quality_score": (int, float, type(None)),
+              "quality_source": str,
+              "quality_verified": bool,
+              "open_weights": bool,
+              "value_tier": str,
+          }
+          valid_status = {"active", "beta", "deprecated", "commercial"}
+          valid_tiers = {"S", "A", "B"}
+
+          all_entries = []
+          for fname in ("data/pareto-flash.json", "data/self-host.json"):
+              data = json.loads(pathlib.Path(fname).read_text())
+              assert isinstance(data, list) and data, f"{fname}: JSON must be a non-empty list"
+              for i, entry in enumerate(data):
+                  for field, ftype in {**base_required, **efficiency_required}.items():
+                      assert field in entry, f"{fname} entry {i} missing field: {field}"
+                      assert isinstance(entry[field], ftype), \
+                          f"{fname} entry {i} field {field} must be {ftype}"
+                      if ftype is str and field not in {"pricing_url"}:
+                          assert entry[field].strip(), f"{fname} entry {i} field {field} must be non-empty"
+                  assert entry["status"] in valid_status, f"{fname} entry {i} invalid status"
+                  assert entry["category"] == "budget", f"{fname} entry {i} category must be 'budget'"
+                  assert entry["value_tier"] in valid_tiers, f"{fname} entry {i} invalid value_tier"
+                  assert entry["quality_source"].strip(), f"{fname} entry {i} quality_source must be non-empty"
+                  if entry["quality_score"] is None:
+                      assert entry["quality_source"] == "unverified", \
+                          f"{fname} entry {i}: null quality_score needs quality_source 'unverified'"
+                  for u in (entry["url"], entry["pricing_url"]):
+                      if u:
+                          assert u.startswith("https://"), f"{fname} entry {i} URL must use https: {u}"
+                  if entry["price_verified"]:
+                      assert entry["pricing_url"].startswith("https://"), \
+                          f"{fname} entry {i} verified price needs https pricing_url"
+                  else:
+                      assert entry["pricing_url"] == "", \
+                          f"{fname} entry {i} unverified price must not claim a pricing_url"
+                  if entry["price_input_per_1m"] == "self-host":
+                      assert fname == "data/self-host.json", \
+                          f"{fname} entry {i}: self-host pricing only in self-host.json"
+                      assert entry["price_output_per_1m"] == "self-host"
+                      assert not entry["price_verified"]
+                  else:
+                      assert entry["price_input_per_1m"].startswith("$"), \
+                          f"{fname} entry {i} hosted price must look like '$X': {entry['price_input_per_1m']}"
+                  assert 1 <= len(entry["features"]) <= 6, f"{fname} entry {i} features must have 1-6 items"
+                  all_entries.append((fname, i, entry))
+              print(f"OK: {fname} ({len(data)} entries validated)")
+
+          names = [e["name"] for _, _, e in all_entries]
+          assert len(names) == len(set(names)), "duplicate model name across data files"
+          print(f"OK: {len(all_entries)} total entries, no duplicates")
+          EOF
+      - name: Check Markdown links (lychee)
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: --config .lychee.toml README.md CONTRIBUTING.md docs/
+          fail: true
